@@ -1,302 +1,188 @@
-import React, { useState } from 'react';
-import { Upload, Download, AlertCircle, CheckCircle, FileText } from 'lucide-react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import streamlit as st
+import pandas as pd
+import io
+import re
 
-const CSVProcessor = () => {
-  const [outputFiles, setOutputFiles] = useState([]);
-  const [inputFile, setInputFile] = useState(null);
-  const [processing, setProcessing] = useState(false);
-  const [results, setResults] = useState(null);
-  const [error, setError] = useState('');
+st.set_page_config(page_title="CSV Address Processor", page_icon="📊", layout="wide")
 
-  const parseCSV = (text) => {
-    const lines = text.split('\n').filter(line => line.trim());
-    if (lines.length === 0) return { headers: [], rows: [] };
+def normalize_address(addr):
+    """Normalize address for comparison"""
+    if pd.isna(addr):
+        return ""
+    addr = str(addr).upper()
+    addr = re.sub(r'\s+', ' ', addr)
+    addr = re.sub(r'[.,#-]', '', addr)
+    return addr.strip()
+
+def process_csv_files(output_files, input_file):
+    """Main processing logic"""
+    results = {}
     
-    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
-    const rows = lines.slice(1).map(line => {
-      const values = [];
-      let current = '';
-      let inQuotes = false;
-      
-      for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          values.push(current.trim().replace(/^"|"$/g, ''));
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      values.push(current.trim().replace(/^"|"$/g, ''));
-      
-      const row = {};
-      headers.forEach((header, idx) => {
-        row[header] = values[idx] || '';
-      });
-      return row;
-    });
+    # Step 1: Combine multiple CSV files
+    all_dfs = []
+    for file in output_files:
+        df = pd.read_csv(file)
+        all_dfs.append(df)
     
-    return { headers, rows };
-  };
-
-  const normalizeAddress = (addr) => {
-    return addr.toUpperCase()
-      .replace(/\s+/g, ' ')
-      .replace(/[.,#-]/g, '')
-      .trim();
-  };
-
-  const processFiles = async () => {
-    setProcessing(true);
-    setError('');
-    setResults(null);
-
-    try {
-      if (outputFiles.length === 0) {
-        throw new Error('Please upload at least one output CSV file');
-      }
-      if (!inputFile) {
-        throw new Error('Please upload the original input file');
-      }
-
-      // Step 1: Combine multiple CSV files
-      let allRows = [];
-      let headers = [];
-      
-      for (const file of outputFiles) {
-        const text = await file.text();
-        const parsed = parseCSV(text);
-        if (headers.length === 0) {
-          headers = parsed.headers;
-        }
-        allRows = allRows.concat(parsed.rows);
-      }
-
-      // Step 2: Remove rows with "failed" in remarks column
-      const remarksCol = headers.find(h => h.toLowerCase().includes('remark'));
-      const validRows = allRows.filter(row => {
-        const remarks = remarksCol ? row[remarksCol] : '';
-        return !remarks.toLowerCase().includes('failed');
-      });
-
-      // Step 3: Parse input file
-      const inputText = await inputFile.text();
-      const inputData = parseCSV(inputText);
-      
-      // Find location column in output
-      const locationCol = headers.find(h => h.toLowerCase().includes('location'));
-      if (!locationCol) {
-        throw new Error('Could not find "Location" column in output files');
-      }
-
-      // Find address columns in input
-      const addressCol = inputData.headers.find(h => h.toLowerCase().includes('address'));
-      const suiteCol = inputData.headers.find(h => h.toLowerCase().includes('suite'));
-      const cityCol = inputData.headers.find(h => h.toLowerCase().includes('city'));
-      const stateCol = inputData.headers.find(h => h.toLowerCase().includes('state'));
-      const zipCol = inputData.headers.find(h => h.toLowerCase().includes('zip'));
-
-      if (!addressCol || !cityCol || !stateCol) {
-        throw new Error('Could not find required address columns in input file');
-      }
-
-      // Create normalized address map from output
-      const processedAddresses = new Set();
-      validRows.forEach(row => {
-        if (row[locationCol]) {
-          processedAddresses.add(normalizeAddress(row[locationCol]));
-        }
-      });
-
-      // Find missed addresses
-      const missedRows = [];
-      inputData.rows.forEach(row => {
-        let fullAddress = row[addressCol] || '';
-        if (suiteCol && row[suiteCol]) {
-          fullAddress += ' ' + row[suiteCol];
-        }
-        fullAddress += ' ' + (row[cityCol] || '');
-        fullAddress += ' ' + (row[stateCol] || '');
-        if (zipCol && row[zipCol]) {
-          fullAddress += ' ' + row[zipCol];
-        }
-
-        const normalized = normalizeAddress(fullAddress);
-        if (!processedAddresses.has(normalized)) {
-          missedRows.push(row);
-        }
-      });
-
-      // Step 4: Create downloadable files
-      const createCSV = (headers, rows) => {
-        const csvContent = [
-          headers.join(','),
-          ...rows.map(row => 
-            headers.map(h => {
-              const val = row[h] || '';
-              return val.includes(',') ? `"${val}"` : val;
-            }).join(',')
-          )
-        ].join('\n');
-        return csvContent;
-      };
-
-      const mergedCSV = createCSV(headers, validRows);
-      const missedCSV = createCSV(inputData.headers, missedRows);
-
-      setResults({
-        totalOutput: allRows.length,
-        failedRemoved: allRows.length - validRows.length,
-        validRecords: validRows.length,
-        totalInput: inputData.rows.length,
-        missedCount: missedRows.length,
-        mergedCSV,
-        missedCSV,
-        mergedFilename: 'merged_valid_records.csv',
-        missedFilename: 'missed_addresses_rerun.csv'
-      });
-
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setProcessing(false);
+    merged_df = pd.concat(all_dfs, ignore_index=True)
+    results['total_output'] = len(merged_df)
+    
+    # Step 2: Remove rows with "failed" in remarks column
+    remarks_col = [col for col in merged_df.columns if 'remark' in col.lower()]
+    if remarks_col:
+        valid_df = merged_df[~merged_df[remarks_col[0]].str.contains('failed', case=False, na=False)]
+    else:
+        valid_df = merged_df
+    
+    results['failed_removed'] = len(merged_df) - len(valid_df)
+    results['valid_records'] = len(valid_df)
+    
+    # Step 3: Parse input file and compare
+    input_df = pd.read_csv(input_file)
+    results['total_input'] = len(input_df)
+    
+    # Find location column in output
+    location_col = [col for col in valid_df.columns if 'location' in col.lower()]
+    if not location_col:
+        st.error("Could not find 'Location' column in output files")
+        return None
+    location_col = location_col[0]
+    
+    # Find address columns in input
+    address_col = [col for col in input_df.columns if 'address' in col.lower()][0]
+    city_col = [col for col in input_df.columns if 'city' in col.lower()][0]
+    state_col = [col for col in input_df.columns if 'state' in col.lower()][0]
+    
+    suite_col = [col for col in input_df.columns if 'suite' in col.lower()]
+    suite_col = suite_col[0] if suite_col else None
+    
+    zip_col = [col for col in input_df.columns if 'zip' in col.lower()]
+    zip_col = zip_col[0] if zip_col else None
+    
+    # Create normalized address set from output
+    processed_addresses = set()
+    for idx, row in valid_df.iterrows():
+        if pd.notna(row[location_col]):
+            processed_addresses.add(normalize_address(row[location_col]))
+    
+    # Find missed addresses
+    missed_rows = []
+    for idx, row in input_df.iterrows():
+        full_address = str(row[address_col]) if pd.notna(row[address_col]) else ""
+        
+        if suite_col and pd.notna(row[suite_col]):
+            full_address += " " + str(row[suite_col])
+        
+        full_address += " " + (str(row[city_col]) if pd.notna(row[city_col]) else "")
+        full_address += " " + (str(row[state_col]) if pd.notna(row[state_col]) else "")
+        
+        if zip_col and pd.notna(row[zip_col]):
+            full_address += " " + str(row[zip_col])
+        
+        normalized = normalize_address(full_address)
+        if normalized not in processed_addresses:
+            missed_rows.append(row)
+    
+    missed_df = pd.DataFrame(missed_rows)
+    results['missed_count'] = len(missed_df)
+    
+    return {
+        'results': results,
+        'valid_df': valid_df,
+        'missed_df': missed_df
     }
-  };
 
-  const downloadFile = (content, filename) => {
-    const blob = new Blob([content], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+# Streamlit UI
+st.title("📊 CSV Address Processor")
+st.markdown("Merge runs, remove failures, and identify missed addresses")
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="bg-white rounded-lg shadow-xl p-8">
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">CSV Address Processor</h1>
-          <p className="text-gray-600 mb-6">Merge runs, remove failures, and identify missed addresses</p>
+st.divider()
 
-          {/* Step 1: Upload Output Files */}
-          <div className="mb-6">
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              Step 1: Upload Output CSV Files (Multiple Runs)
-            </label>
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-indigo-500 transition-colors">
-              <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
-              <input
-                type="file"
-                multiple
-                accept=".csv"
-                onChange={(e) => setOutputFiles(Array.from(e.target.files))}
-                className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-              />
-              {outputFiles.length > 0 && (
-                <p className="mt-2 text-sm text-green-600">
-                  {outputFiles.length} file(s) selected
-                </p>
-              )}
-            </div>
-          </div>
+# Step 1: Upload Output Files
+st.subheader("Step 1: Upload Output CSV Files (Multiple Runs)")
+output_files = st.file_uploader(
+    "Upload your output CSV files",
+    type=['csv'],
+    accept_multiple_files=True,
+    key="output"
+)
 
-          {/* Step 2: Upload Input File */}
-          <div className="mb-6">
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              Step 2: Upload Original Input File
-            </label>
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-indigo-500 transition-colors">
-              <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
-              <input
-                type="file"
-                accept=".csv"
-                onChange={(e) => setInputFile(e.target.files[0])}
-                className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-              />
-              {inputFile && (
-                <p className="mt-2 text-sm text-green-600">
-                  {inputFile.name}
-                </p>
-              )}
-            </div>
-          </div>
+if output_files:
+    st.success(f"✅ {len(output_files)} file(s) uploaded")
 
-          {/* Process Button */}
-          <button
-            onClick={processFiles}
-            disabled={processing || outputFiles.length === 0 || !inputFile}
-            className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors mb-6"
-          >
-            {processing ? 'Processing...' : 'Process Files'}
-          </button>
+st.divider()
 
-          {/* Error Display */}
-          {error && (
-            <Alert className="mb-6 bg-red-50 border-red-200">
-              <AlertCircle className="h-4 w-4 text-red-600" />
-              <AlertDescription className="text-red-800">{error}</AlertDescription>
-            </Alert>
-          )}
+# Step 2: Upload Input File
+st.subheader("Step 2: Upload Original Input File")
+input_file = st.file_uploader(
+    "Upload your original input CSV file",
+    type=['csv'],
+    key="input"
+)
 
-          {/* Results */}
-          {results && (
-            <div className="space-y-6">
-              <Alert className="bg-green-50 border-green-200">
-                <CheckCircle className="h-4 w-4 text-green-600" />
-                <AlertDescription className="text-green-800">
-                  Processing complete!
-                </AlertDescription>
-              </Alert>
+if input_file:
+    st.success(f"✅ {input_file.name} uploaded")
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-blue-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Total Output Records</p>
-                  <p className="text-2xl font-bold text-blue-700">{results.totalOutput}</p>
-                </div>
-                <div className="bg-red-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Failed Records Removed</p>
-                  <p className="text-2xl font-bold text-red-700">{results.failedRemoved}</p>
-                </div>
-                <div className="bg-green-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Valid Records</p>
-                  <p className="text-2xl font-bold text-green-700">{results.validRecords}</p>
-                </div>
-                <div className="bg-orange-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Missed Addresses</p>
-                  <p className="text-2xl font-bold text-orange-700">{results.missedCount}</p>
-                </div>
-              </div>
+st.divider()
 
-              <div className="space-y-3">
-                <button
-                  onClick={() => downloadFile(results.mergedCSV, results.mergedFilename)}
-                  className="w-full bg-green-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-                >
-                  <Download className="h-5 w-5" />
-                  Download Merged Valid Records
-                </button>
+# Process Button
+if st.button("🚀 Process Files", type="primary", use_container_width=True):
+    if not output_files:
+        st.error("Please upload at least one output CSV file")
+    elif not input_file:
+        st.error("Please upload the original input file")
+    else:
+        with st.spinner("Processing files..."):
+            try:
+                result = process_csv_files(output_files, input_file)
                 
-                {results.missedCount > 0 && (
-                  <button
-                    onClick={() => downloadFile(results.missedCSV, results.missedFilename)}
-                    className="w-full bg-orange-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-orange-700 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <FileText className="h-5 w-5" />
-                    Download Missed Addresses for Rerun
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default CSVProcessor;
+                if result:
+                    st.success("✅ Processing complete!")
+                    
+                    # Display metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Total Output Records", result['results']['total_output'])
+                    with col2:
+                        st.metric("Failed Records Removed", result['results']['failed_removed'])
+                    with col3:
+                        st.metric("Valid Records", result['results']['valid_records'])
+                    with col4:
+                        st.metric("Missed Addresses", result['results']['missed_count'])
+                    
+                    st.divider()
+                    
+                    # Download buttons
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Merged valid records
+                        csv_buffer = io.StringIO()
+                        result['valid_df'].to_csv(csv_buffer, index=False)
+                        st.download_button(
+                            label="⬇️ Download Merged Valid Records",
+                            data=csv_buffer.getvalue(),
+                            file_name="merged_valid_records.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    
+                    with col2:
+                        # Missed addresses
+                        if result['results']['missed_count'] > 0:
+                            csv_buffer = io.StringIO()
+                            result['missed_df'].to_csv(csv_buffer, index=False)
+                            st.download_button(
+                                label="⬇️ Download Missed Addresses for Rerun",
+                                data=csv_buffer.getvalue(),
+                                file_name="missed_addresses_rerun.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                        else:
+                            st.info("No missed addresses found!")
+                    
+            except Exception as e:
+                st.error(f"Error processing files: {str(e)}")
+                st.exception(e)
