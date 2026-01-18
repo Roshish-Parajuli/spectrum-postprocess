@@ -14,6 +14,27 @@ def normalize_address(addr):
     addr = re.sub(r'[.,#-]', '', addr)
     return addr.strip()
 
+def get_input_row_from_location(location, input_df, address_col, suite_col, city_col, state_col, zip_col):
+    """Find matching input row based on location string"""
+    normalized_location = normalize_address(location)
+    
+    for idx, row in input_df.iterrows():
+        full_address = str(row[address_col]) if pd.notna(row[address_col]) else ""
+        
+        if suite_col and pd.notna(row[suite_col]):
+            full_address += " " + str(row[suite_col])
+        
+        full_address += " " + (str(row[city_col]) if pd.notna(row[city_col]) else "")
+        full_address += " " + (str(row[state_col]) if pd.notna(row[state_col]) else "")
+        
+        if zip_col and pd.notna(row[zip_col]):
+            full_address += " " + str(row[zip_col])
+        
+        if normalize_address(full_address) == normalized_location:
+            return row
+    
+    return None
+
 def process_csv_files(output_files, input_file):
     """Main processing logic"""
     results = {}
@@ -27,14 +48,18 @@ def process_csv_files(output_files, input_file):
     merged_df = pd.concat(all_dfs, ignore_index=True)
     results['total_output'] = len(merged_df)
     
-    # Step 2: Remove rows with "failed" in remarks column
+    # Step 2: Separate failed and valid records
     remarks_col = [col for col in merged_df.columns if 'remark' in col.lower()]
-    if remarks_col:
-        valid_df = merged_df[~merged_df[remarks_col[0]].str.contains('failed', case=False, na=False)]
-    else:
-        valid_df = merged_df
     
-    results['failed_removed'] = len(merged_df) - len(valid_df)
+    if remarks_col:
+        remarks_col = remarks_col[0]
+        failed_df = merged_df[merged_df[remarks_col].str.contains('failed', case=False, na=False)].copy()
+        valid_df = merged_df[~merged_df[remarks_col].str.contains('failed', case=False, na=False)].copy()
+    else:
+        failed_df = pd.DataFrame()
+        valid_df = merged_df.copy()
+    
+    results['failed_removed'] = len(failed_df)
     results['valid_records'] = len(valid_df)
     
     # Step 3: Parse input file and compare
@@ -42,16 +67,24 @@ def process_csv_files(output_files, input_file):
     results['total_input'] = len(input_df)
     
     # Find location column in output
-    location_col = [col for col in valid_df.columns if 'location' in col.lower()]
+    location_col = [col for col in merged_df.columns if 'location' in col.lower()]
     if not location_col:
         st.error("Could not find 'Location' column in output files")
         return None
     location_col = location_col[0]
     
     # Find address columns in input
-    address_col = [col for col in input_df.columns if 'address' in col.lower()][0]
-    city_col = [col for col in input_df.columns if 'city' in col.lower()][0]
-    state_col = [col for col in input_df.columns if 'state' in col.lower()][0]
+    address_cols = [col for col in input_df.columns if 'address' in col.lower()]
+    city_cols = [col for col in input_df.columns if 'city' in col.lower()]
+    state_cols = [col for col in input_df.columns if 'state' in col.lower()]
+    
+    if not address_cols or not city_cols or not state_cols:
+        st.error("Could not find required address columns in input file")
+        return None
+    
+    address_col = address_cols[0]
+    city_col = city_cols[0]
+    state_col = state_cols[0]
     
     suite_col = [col for col in input_df.columns if 'suite' in col.lower()]
     suite_col = suite_col[0] if suite_col else None
@@ -59,13 +92,13 @@ def process_csv_files(output_files, input_file):
     zip_col = [col for col in input_df.columns if 'zip' in col.lower()]
     zip_col = zip_col[0] if zip_col else None
     
-    # Create normalized address set from output
+    # Create normalized address set from VALID output (not failed)
     processed_addresses = set()
     for idx, row in valid_df.iterrows():
         if pd.notna(row[location_col]):
             processed_addresses.add(normalize_address(row[location_col]))
     
-    # Find missed addresses
+    # Find missed addresses (not in valid output)
     missed_rows = []
     for idx, row in input_df.iterrows():
         full_address = str(row[address_col]) if pd.notna(row[address_col]) else ""
@@ -83,13 +116,36 @@ def process_csv_files(output_files, input_file):
         if normalized not in processed_addresses:
             missed_rows.append(row)
     
-    missed_df = pd.DataFrame(missed_rows)
-    results['missed_count'] = len(missed_df)
+    # Add failed records to rerun list by finding their original input rows
+    failed_input_rows = []
+    for idx, row in failed_df.iterrows():
+        if pd.notna(row[location_col]):
+            matching_input = get_input_row_from_location(
+                row[location_col], 
+                input_df, 
+                address_col, 
+                suite_col, 
+                city_col, 
+                state_col, 
+                zip_col
+            )
+            if matching_input is not None:
+                failed_input_rows.append(matching_input)
+    
+    # Combine missed addresses and failed addresses for rerun
+    all_rerun_rows = missed_rows + failed_input_rows
+    
+    # Remove duplicates from rerun list
+    rerun_df = pd.DataFrame(all_rerun_rows).drop_duplicates()
+    
+    results['missed_count'] = len(pd.DataFrame(missed_rows))
+    results['failed_for_rerun'] = len(failed_input_rows)
+    results['total_rerun'] = len(rerun_df)
     
     return {
         'results': results,
         'valid_df': valid_df,
-        'missed_df': missed_df
+        'rerun_df': rerun_df
     }
 
 # Streamlit UI
@@ -140,16 +196,20 @@ if st.button("🚀 Process Files", type="primary", use_container_width=True):
                     st.success("✅ Processing complete!")
                     
                     # Display metrics
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     
                     with col1:
                         st.metric("Total Output Records", result['results']['total_output'])
                     with col2:
-                        st.metric("Failed Records Removed", result['results']['failed_removed'])
+                        st.metric("Failed Records", result['results']['failed_removed'])
                     with col3:
                         st.metric("Valid Records", result['results']['valid_records'])
                     with col4:
                         st.metric("Missed Addresses", result['results']['missed_count'])
+                    with col5:
+                        st.metric("Total for Rerun", result['results']['total_rerun'])
+                        
+                    st.info(f"ℹ️ Rerun file includes: {result['results']['missed_count']} missed addresses + {result['results']['failed_for_rerun']} failed records")
                     
                     st.divider()
                     
@@ -169,19 +229,19 @@ if st.button("🚀 Process Files", type="primary", use_container_width=True):
                         )
                     
                     with col2:
-                        # Missed addresses
-                        if result['results']['missed_count'] > 0:
+                        # Rerun file (missed + failed)
+                        if result['results']['total_rerun'] > 0:
                             csv_buffer = io.StringIO()
-                            result['missed_df'].to_csv(csv_buffer, index=False)
+                            result['rerun_df'].to_csv(csv_buffer, index=False)
                             st.download_button(
-                                label="⬇️ Download Missed Addresses for Rerun",
+                                label="⬇️ Download Addresses for Rerun",
                                 data=csv_buffer.getvalue(),
-                                file_name="missed_addresses_rerun.csv",
+                                file_name="addresses_for_rerun.csv",
                                 mime="text/csv",
                                 use_container_width=True
                             )
                         else:
-                            st.info("No missed addresses found!")
+                            st.info("No addresses need rerun!")
                     
             except Exception as e:
                 st.error(f"Error processing files: {str(e)}")
