@@ -50,11 +50,15 @@ def process_csv_files(output_files, input_file):
     
     # Step 2: Separate failed and valid records
     remarks_col = [col for col in merged_df.columns if 'Remarks' in col.lower()]
-    
     if remarks_col:
         remarks_col = remarks_col[0]
-        failed_df = merged_df[merged_df[remarks_col].str.contains('failed', case=False, na=False)].copy()
-        valid_df = merged_df[~merged_df[remarks_col].str.contains('failed', case=False, na=False)].copy()
+        # Consider both "failed" and "api error" as failures
+        failed_mask = (
+            merged_df[remarks_col].str.contains('failed', case=False, na=False) |
+            merged_df[remarks_col].str.contains('api error', case=False, na=False)
+        )
+        failed_df = merged_df[failed_mask].copy()
+        valid_df = merged_df[~failed_mask].copy()
     else:
         failed_df = pd.DataFrame()
         valid_df = merged_df.copy()
