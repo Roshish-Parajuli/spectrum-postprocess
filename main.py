@@ -20,19 +20,15 @@ def get_input_row_from_location(location, input_df, address_col, suite_col, city
     
     for idx, row in input_df.iterrows():
         full_address = str(row[address_col]) if pd.notna(row[address_col]) else ""
-        
         if suite_col and pd.notna(row[suite_col]):
             full_address += " " + str(row[suite_col])
-        
         full_address += " " + (str(row[city_col]) if pd.notna(row[city_col]) else "")
         full_address += " " + (str(row[state_col]) if pd.notna(row[state_col]) else "")
-        
         if zip_col and pd.notna(row[zip_col]):
             full_address += " " + str(row[zip_col])
         
         if normalize_address(full_address) == normalized_location:
             return row
-    
     return None
 
 def process_csv_files(output_files, input_file):
@@ -49,17 +45,27 @@ def process_csv_files(output_files, input_file):
     results['total_output'] = len(merged_df)
     
     # Step 2: Separate failed and valid records
-    remarks_col = [col for col in merged_df.columns if 'Remarks' in col.lower()]
+    remarks_col = [col for col in merged_df.columns if 'remark' in col.lower()]
+    
     if remarks_col:
         remarks_col = remarks_col[0]
+        st.info(f"📋 Found Remarks column: **{remarks_col}**")
+        
         # Consider both "failed" and "api error" as failures
+        # Convert to string and handle NaN values
+        remarks_series = merged_df[remarks_col].fillna('').astype(str)
+        
         failed_mask = (
-            merged_df[remarks_col].str.contains('failed', case=False, na=False) |
-            merged_df[remarks_col].str.contains('api error', case=False, na=False)
+            remarks_series.str.contains('failed', case=False, regex=False) |
+            remarks_series.str.contains('api error', case=False, regex=False)
         )
+        
         failed_df = merged_df[failed_mask].copy()
         valid_df = merged_df[~failed_mask].copy()
+        
+        st.info(f"🔍 Found **{failed_mask.sum()}** records with 'failed' or 'API Error'")
     else:
+        st.warning("⚠️ Could not find 'Remarks' column in output files")
         failed_df = pd.DataFrame()
         valid_df = merged_df.copy()
     
@@ -106,13 +112,10 @@ def process_csv_files(output_files, input_file):
     missed_rows = []
     for idx, row in input_df.iterrows():
         full_address = str(row[address_col]) if pd.notna(row[address_col]) else ""
-        
         if suite_col and pd.notna(row[suite_col]):
             full_address += " " + str(row[suite_col])
-        
         full_address += " " + (str(row[city_col]) if pd.notna(row[city_col]) else "")
         full_address += " " + (str(row[state_col]) if pd.notna(row[state_col]) else "")
-        
         if zip_col and pd.notna(row[zip_col]):
             full_address += " " + str(row[zip_col])
         
@@ -149,6 +152,7 @@ def process_csv_files(output_files, input_file):
     return {
         'results': results,
         'valid_df': valid_df,
+        'failed_df': failed_df,
         'rerun_df': rerun_df
     }
 
@@ -212,8 +216,15 @@ if st.button("🚀 Process Files", type="primary", use_container_width=True):
                         st.metric("Missed Addresses", result['results']['missed_count'])
                     with col5:
                         st.metric("Total for Rerun", result['results']['total_rerun'])
-                        
+                    
                     st.info(f"ℹ️ Rerun file includes: {result['results']['missed_count']} missed addresses + {result['results']['failed_for_rerun']} failed records")
+                    
+                    st.divider()
+                    
+                    # Preview failed records
+                    if len(result['failed_df']) > 0:
+                        with st.expander(f"🔍 Preview Failed Records ({len(result['failed_df'])} records)"):
+                            st.dataframe(result['failed_df'].head(20), use_container_width=True)
                     
                     st.divider()
                     
@@ -246,7 +257,7 @@ if st.button("🚀 Process Files", type="primary", use_container_width=True):
                             )
                         else:
                             st.info("No addresses need rerun!")
-                    
+                            
             except Exception as e:
                 st.error(f"Error processing files: {str(e)}")
                 st.exception(e)
