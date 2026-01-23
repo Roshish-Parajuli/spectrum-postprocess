@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="CSV Address Processor", page_icon="📊", layout="wide")
+st.set_page_config(page_title="CSV Post Processor", page_icon="📊", layout="wide")
 
 def normalize_address(addr):
     """Normalize address for comparison"""
