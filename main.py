@@ -49,7 +49,7 @@ def process_csv_files(output_files, input_file):
     results['total_output'] = len(merged_df)
     
     # Step 2: Separate failed and valid records
-    remarks_col = [col for col in merged_df.columns if 'remark' in col.lower()]
+    remarks_col = [col for col in merged_df.columns if 'Remarks' in col.lower()]
     
     if remarks_col:
         remarks_col = remarks_col[0]
